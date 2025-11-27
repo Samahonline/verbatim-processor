@@ -85,8 +85,7 @@ class VerbatimProcessor:
 
     def is_numeric_column(self, series: pd.Series) -> bool:
         """
-        Check if column contains mostly numeric data including decimals
-        More aggressive detection using pandas type checking
+        Ultra-aggressive numeric detection for all types of numeric data
         """
         if series.empty:
             return False
@@ -99,8 +98,8 @@ class VerbatimProcessor:
         if len(non_null_series) == 0:
             return False
         
-        # Sample the data
-        sample_size = min(200, len(non_null_series))
+        # Sample more data for better detection
+        sample_size = min(500, len(non_null_series))
         sample = non_null_series.head(sample_size)
         
         numeric_count = 0
@@ -122,17 +121,17 @@ class VerbatimProcessor:
                 if self._is_system_null(value_str):
                     continue
                 
-                # More aggressive numeric detection
+                # Ultra-aggressive numeric detection
                 if self._is_definitely_numeric(value_str):
                     numeric_count += 1
         
-        # If more than 60% is numeric, exclude the column (lowered threshold)
+        # If more than 50% is numeric, exclude the column (very aggressive threshold)
         numeric_ratio = numeric_count / total_count if total_count > 0 else 0
-        return numeric_ratio > 0.6
+        return numeric_ratio > 0.5
 
     def _is_definitely_numeric(self, value_str: str) -> bool:
         """
-        More aggressive numeric detection for decimal numbers and integers
+        Ultra-aggressive numeric detection for all numeric formats
         """
         # Remove any whitespace
         value_str = value_str.strip()
@@ -140,54 +139,75 @@ class VerbatimProcessor:
         # Handle empty strings
         if not value_str:
             return False
+        
+        # Remove any surrounding parentheses (common in some data formats)
+        value_str = value_str.strip('()')
+        
+        # Check for pure numeric patterns first (most common)
+        if value_str.isdigit():
+            return True
             
-        # Common numeric patterns - expanded to catch more cases
+        # Check for simple integers with signs
+        if value_str in ['0', '+0', '-0']:
+            return True
+            
+        # Enhanced numeric patterns
         patterns = [
-            r'^[+-]?\d*\.?\d+$',  # Basic decimal: 1, 1.5, .5, -2.3
-            r'^[+-]?\d+\.\d+$',   # Must have decimal point with digits on both sides: 1.0, 0.5
-            r'^\.\d+$',           # Decimal without leading zero: .5, .25
-            r'^\d+\.$',           # Decimal without trailing digits: 1., 25.
-            r'^[+-]?\d{1,3}(,\d{3})*(\.\d+)?$',  # Numbers with commas
-            r'^[+-]?\d*\.?\d+%$', # Percentages
-            r'^[+-]?\d+\.\d+e[+-]?\d+$',  # Scientific notation
-            r'^\d+$',             # Pure integers
-            r'^[+-]?\d+$',        # Integers with sign
-            r'^\d+\s*$',          # Integers with trailing spaces
+            r'^[+-]?\d+$',                          # Integers with optional sign
+            r'^[+-]?\d*\.\d+$',                     # Decimals: 1.5, .5, 0.5
+            r'^[+-]?\d+\.\d*$',                     # Decimals: 1., 1.5
+            r'^[+-]?\d+\.\d+e[+-]?\d+$',            # Scientific notation
+            r'^[+-]?\.\d+$',                        # Decimals without leading zero
+            r'^[+-]?\d+\.$',                        # Decimals without trailing digits
+            r'^[+-]?\d{1,3}(,\d{3})*(\.\d*)?$',     # Numbers with commas
+            r'^[+-]?\d*\.?\d+%$',                   # Percentages
+            r'^\d+\.\d+\.\d+$',                     # Version numbers (treat as numeric)
+            r'^[+-]?\d+/\d+$',                      # Fractions: 1/2, 3/4
         ]
         
-        # Check patterns first
+        # Remove commas for pattern matching
+        clean_value = value_str.replace(',', '')
+        
         for pattern in patterns:
-            if re.match(pattern, value_str.replace(',', '').replace(' ', '')):
+            if re.match(pattern, clean_value, re.IGNORECASE):
                 return True
         
-        # Try direct float conversion (most reliable)
+        # Try direct conversion (most reliable method)
         try:
-            # Remove commas, percentage signs, and other non-numeric characters except decimal point and sign
-            clean_value = value_str.replace(',', '').replace('%', '').replace(' ', '')
-            float(clean_value)
+            # Remove percentage signs, currency symbols, etc.
+            test_value = clean_value.replace('%', '').replace('$', '').replace('€', '').replace('£', '').replace('¥', '')
+            # Handle fractions
+            if '/' in test_value:
+                parts = test_value.split('/')
+                if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
+                    return True
+            # Try float conversion
+            float(test_value)
             return True
         except (ValueError, TypeError):
             pass
         
-        # Additional check: if it looks like a number with multiple decimal points (invalid but common in data)
-        if value_str.count('.') == 1 and any(c.isdigit() for c in value_str):
-            # Try removing all non-numeric except first decimal point
-            parts = value_str.split('.')
-            if len(parts) == 2:
-                before_decimal = ''.join(c for c in parts[0] if c.isdigit() or c in '+-')
-                after_decimal = ''.join(c for c in parts[1] if c.isdigit())
-                if before_decimal or after_decimal:
-                    try:
-                        test_value = f"{before_decimal or '0'}.{after_decimal}"
-                        float(test_value)
-                        return True
-                    except:
-                        pass
+        # Additional checks for edge cases
+        # Check if it's a numeric string with some non-numeric characters at the ends
+        if len(value_str) > 1:
+            # Remove non-numeric characters from start and end
+            stripped = value_str.strip(' \t\n\r$€£¥%()[]{}')
+            if stripped and (stripped.isdigit() or self._is_decimal_number(stripped)):
+                return True
         
-        # Check for integer-only strings (no letters, no special chars except +-)
-        if value_str.replace('+', '').replace('-', '').replace(' ', '').isdigit():
-            return True
-        
+        return False
+
+    def _is_decimal_number(self, value_str: str) -> bool:
+        """Check if string is a decimal number"""
+        try:
+            # Count decimal points - should be exactly 1
+            if value_str.count('.') == 1:
+                parts = value_str.split('.')
+                # Both parts should be digits or empty (like .5 or 1.)
+                if (not parts[0] or parts[0].lstrip('-+').isdigit()) and (not parts[1] or parts[1].isdigit()):
+                    return True
+        except:
+            pass
         return False
 
     def is_date_column(self, series: pd.Series, column_name: str = "") -> bool:
@@ -441,6 +461,10 @@ class VerbatimProcessor:
         
         # Filter out system NULL values including #NULL!
         if self._is_system_null(value_str):
+            return ""
+        
+        # Filter out numeric values
+        if self._is_definitely_numeric(value_str):
             return ""
         
         return value_str
