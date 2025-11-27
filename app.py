@@ -20,14 +20,16 @@ class VerbatimProcessor:
             'verbatim', 'text', 'comment', 'response', 'answer',
             'open', 'openend', 'qualitative', 'feedback', 'remark',
             'opinion', 'suggestion', 'describe', 'explain', 'why',
-            'other', 'specify', 'additional', 'thought', 'idea'
+            'other', 'specify', 'additional', 'thought', 'idea',
+            'q8', 'q9', 'ta', 'tb', 'tc', 'tf', 'ts', 's8', 's9'  # Added common question patterns
         ]
         
-        self.null_indicators = [
-            'null', 'none', 'empty', 'n/a', 'na', 'missing', 
-            'no data', 'no response', 'blank'
+        # Only exclude columns with explicit NULL names, not content
+        self.null_column_names = [
+            'null', 'none', 'empty', 'missing', 'blank'
         ]
         
+        # Keep date and address exclusion for column names only
         self.date_keywords = [
             'date', 'time', 'timestamp', 'created', 'updated', 'modified',
             'day', 'month', 'year', 'birth', 'dob', 'start', 'end',
@@ -36,19 +38,34 @@ class VerbatimProcessor:
         
         self.address_keywords = [
             'address', 'street', 'city', 'state', 'zip', 'postal', 'postcode',
-            'country', 'location', 'county', 'province', 'region',
-            'addr', 'st', 'road', 'ave', 'avenue', 'boulevard', 'blvd'
+            'country', 'location', 'county', 'province', 'region'
         ]
 
     def is_verbatim_column(self, column_name: str) -> bool:
+        """
+        More inclusive verbatim column detection
+        """
         if not isinstance(column_name, str):
             return False
         
         column_lower = column_name.lower()
+        
+        # Check for verbatim keywords in column name
         for keyword in self.verbatim_keywords:
             if keyword in column_lower:
                 return True
         
+        # Check for common question patterns (Q, TA, TB, etc.)
+        question_patterns = [
+            r'^q\d', r'^ta\d', r'^tb\d', r'^tc\d', r'^tf\d', r'^ts\d',
+            r'^s\d', r'^t\d', r'^[a-z]{1,2}\d+[a-z]*\d*'
+        ]
+        
+        for pattern in question_patterns:
+            if re.match(pattern, column_lower):
+                return True
+        
+        # Check for text-like patterns
         text_patterns = [r'.*text.*', r'.*comment.*', r'.*response.*', r'.*answer.*']
         for pattern in text_patterns:
             if re.match(pattern, column_lower):
@@ -56,15 +73,17 @@ class VerbatimProcessor:
         
         return False
 
-    def is_excluded_column(self, column_name: str) -> bool:
-        """Check if column should be excluded based on name"""
+    def should_exclude_column_by_name(self, column_name: str) -> bool:
+        """
+        Only exclude columns based on name, not content
+        """
         if not isinstance(column_name, str):
             return False
             
         col_lower = column_name.lower()
         
-        # Check for exclusion keywords
-        if any(null_indicator in col_lower for null_indicator in self.null_indicators):
+        # Only exclude if column name explicitly indicates NULL/date/address
+        if any(null_name in col_lower for null_name in self.null_column_names):
             return True
         if any(date_keyword in col_lower for date_keyword in self.date_keywords):
             return True
@@ -91,37 +110,37 @@ class VerbatimProcessor:
         return df.columns[0]
 
     def detect_verbatim_columns(self, df: pd.DataFrame) -> List[str]:
+        """
+        More inclusive verbatim column detection
+        Focus on column names and basic content checks
+        """
         verbatim_columns = []
         excluded_columns = []
         
         for column in df.columns:
             column_name = str(column)
             
-            # Skip excluded columns by name
-            if self.is_excluded_column(column_name):
+            # Skip only columns with explicit NULL/date/address names
+            if self.should_exclude_column_by_name(column_name):
                 excluded_columns.append((column_name, "Excluded by name"))
                 continue
             
-            # Skip if mostly empty (but keep if at least some responses)
+            # Skip if completely empty (no data at all)
             non_null_count = df[column].notna().sum()
             if non_null_count == 0:
-                excluded_columns.append((column_name, "All NULL"))
+                excluded_columns.append((column_name, "Completely empty"))
                 continue
-                
-            # Check if verbatim column
+            
+            # Check if it's a verbatim column by name patterns
             if self.is_verbatim_column(column_name):
                 verbatim_columns.append(column)
+                continue
+            
+            # For columns not matching verbatim patterns, check if they contain any text data
+            if self._has_any_text_content(df[column]):
+                verbatim_columns.append(column)
             else:
-                # Sample to check if it's text data
-                sample = df[column].dropna().head(10)
-                if len(sample) > 0:
-                    text_like = sum(1 for val in sample if isinstance(val, str) and len(str(val).strip()) > 0)
-                    if text_like / len(sample) > 0.3:  # Lower threshold to be more inclusive
-                        verbatim_columns.append(column)
-                    else:
-                        excluded_columns.append((column_name, "Not text-like"))
-                else:
-                    excluded_columns.append((column_name, "No valid data"))
+                excluded_columns.append((column_name, "No text content"))
         
         # Show excluded columns in sidebar
         if excluded_columns:
@@ -132,21 +151,32 @@ class VerbatimProcessor:
         
         return verbatim_columns
 
+    def _has_any_text_content(self, series: pd.Series) -> bool:
+        """
+        Check if series has ANY text content at all
+        Very inclusive - just check for non-empty strings
+        """
+        non_null_series = series.dropna()
+        if non_null_series.empty:
+            return False
+        
+        # Check if any value is a non-empty string
+        for value in non_null_series.head(20):  # Check first 20 non-null values
+            if isinstance(value, str) and value.strip():
+                return True
+        
+        return False
+
     def clean_verbatim_value(self, value):
         """
-        Clean individual verbatim values while preserving ALL text content
-        Only removes actual NULL indicators, preserves all other text including non-English
+        Preserve ALL text content, only convert actual missing values to empty strings
         """
         if pd.isna(value):
-            return ""  # Keep as empty string for missing responses
+            return ""  # Convert actual missing values to empty string
         
         value_str = str(value).strip()
         
-        # Only filter out explicit NULL indicators, preserve all other text
-        if value_str.lower() in [null.lower() for null in self.null_indicators]:
-            return ""
-            
-        # Return the original text as-is, preserving all characters including Arabic, etc.
+        # Return the original text as-is, preserving all characters
         return value_str
 
     def process_dataframe(self, df: pd.DataFrame) -> Tuple[io.BytesIO, Dict]:
@@ -155,14 +185,14 @@ class VerbatimProcessor:
             verbatim_columns = self.detect_verbatim_columns(df)
             
             if not verbatim_columns:
-                raise ValueError("No valid verbatim columns found. Please check your data format.")
+                raise ValueError("No verbatim columns found. Please check your data format.")
             
             output = io.BytesIO()
             
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 workbook = writer.book
                 
-                # Create a format for empty/missing responses
+                # Create formats
                 empty_format = workbook.add_format({'font_color': '#999999'})
                 header_format = workbook.add_format({
                     'bold': True,
@@ -170,14 +200,30 @@ class VerbatimProcessor:
                     'border': 1
                 })
                 
-                # Summary sheet with response statistics
+                # Enhanced Summary sheet
                 summary_data = {
-                    'Question Column': verbatim_columns,
-                    'Total Sample Size': [len(df)] * len(verbatim_columns),
-                    'Responses Received': [df[col].notna().sum() for col in verbatim_columns],
-                    'Missing Responses': [df[col].isna().sum() for col in verbatim_columns],
-                    'Response Rate': [f"{(df[col].notna().sum() / len(df) * 100):.1f}%" for col in verbatim_columns]
+                    'Sheet Name': [],
+                    'Original Column': [],
+                    'Total Sample Size': [],
+                    'Responses Received': [],
+                    'Missing Responses': [],
+                    'Response Rate': []
                 }
+                
+                for i, col in enumerate(verbatim_columns):
+                    sheet_name = f"Q{i+1}_{col}"[:31]
+                    total_samples = len(df)
+                    responses_received = df[col].notna().sum()
+                    missing_responses = df[col].isna().sum()
+                    response_rate = (responses_received / total_samples) * 100
+                    
+                    summary_data['Sheet Name'].append(sheet_name)
+                    summary_data['Original Column'].append(col)
+                    summary_data['Total Sample Size'].append(total_samples)
+                    summary_data['Responses Received'].append(responses_received)
+                    summary_data['Missing Responses'].append(missing_responses)
+                    summary_data['Response Rate'].append(f"{response_rate:.1f}%")
+                
                 summary_df = pd.DataFrame(summary_data)
                 summary_df.to_excel(writer, sheet_name='Summary', index=False)
                 
@@ -185,21 +231,21 @@ class VerbatimProcessor:
                 summary_sheet = writer.sheets['Summary']
                 for col_num, value in enumerate(summary_df.columns.values):
                     summary_sheet.write(0, col_num, value, header_format)
-                summary_sheet.set_column('A:A', 30)
-                summary_sheet.set_column('B:E', 15)
+                summary_sheet.set_column('A:A', 20)
+                summary_sheet.set_column('B:B', 30)
+                summary_sheet.set_column('C:F', 15)
                 
                 # Individual question sheets - ALL SAMPLES INCLUDED
                 for i, verbatim_col in enumerate(verbatim_columns):
-                    sheet_name = f"Q{i+1}_{verbatim_col}"[:31]  # Excel sheet name limit
+                    sheet_name = f"Q{i+1}_{verbatim_col}"[:31]
                     
-                    # Create dataframe with ALL samples (including missing responses)
+                    # Create dataframe with ALL samples
                     result_df = df[[intnr_column, verbatim_col]].copy()
                     
-                    # Clean the verbatim responses but keep all rows
-                    # PRESERVE ALL TEXT CONTENT - only remove actual NULL indicators
+                    # Clean responses but preserve all content
                     result_df['Cleaned_Response'] = result_df[verbatim_col].apply(self.clean_verbatim_value)
                     
-                    # Create final output with original ID and cleaned response
+                    # Create final output
                     final_df = result_df[[intnr_column, 'Cleaned_Response']].copy()
                     final_df.columns = [intnr_column, f'Response_{verbatim_col}']
                     
@@ -219,26 +265,24 @@ class VerbatimProcessor:
                         if response_value == "":
                             worksheet.write(row_num, 1, "", empty_format)
                     
-                    worksheet.set_column('A:A', 15)  # ID column
-                    worksheet.set_column('B:B', 50)  # Response column
+                    worksheet.set_column('A:A', 15)
+                    worksheet.set_column('B:B', 50)
                     
                     # Add auto-filter
                     worksheet.autofilter(0, 0, len(final_df), 1)
                 
-                # Sample Tracking Sheet - Master list of all respondents
+                # Sample Tracking Sheet
                 tracking_data = {
                     intnr_column: df[intnr_column],
-                    'In_Final_Analysis': ['Yes'] * len(df)  # All samples included
+                    'Total_Samples': len(df)
                 }
                 tracking_df = pd.DataFrame(tracking_data)
                 tracking_df.to_excel(writer, sheet_name='Sample_Tracking', index=False)
                 
-                # Format tracking sheet
                 tracking_sheet = writer.sheets['Sample_Tracking']
                 for col_num, value in enumerate(tracking_df.columns.values):
                     tracking_sheet.write(0, col_num, value, header_format)
-                tracking_sheet.set_column('A:A', 15)
-                tracking_sheet.set_column('B:B', 15)
+                tracking_sheet.set_column('A:B', 15)
             
             output.seek(0)
             
@@ -246,7 +290,7 @@ class VerbatimProcessor:
                 'status': 'success',
                 'intnr_column': intnr_column,
                 'verbatim_columns': verbatim_columns,
-                'sheets_created': len(verbatim_columns) + 2,  # +2 for Summary and Tracking
+                'sheets_created': len(verbatim_columns) + 2,
                 'total_samples': len(df),
                 'total_questions': len(verbatim_columns)
             }
@@ -259,13 +303,7 @@ def main():
     st.markdown("""
     **Upload your Excel file to automatically extract and organize verbatim text responses**
     
-    *Features:*
-    - 🔍 Automatically detects verbatim columns
-    - 🚫 Excludes NULL, date, and address columns
-    - 📄 Creates separate sheets for each question
-    - 👥 **Includes ALL samples (even missing responses)**
-    - 🌍 **Preserves ALL text content (including non-English characters)**
-    - 💾 Downloads formatted Excel workbook
+    *Improved Detection: Now more inclusive of all question patterns*
     """)
     
     # File upload
@@ -277,7 +315,7 @@ def main():
     
     if uploaded_file is not None:
         try:
-            # Read file with progress
+            # Read file
             with st.spinner("Reading Excel file..."):
                 df = pd.read_excel(uploaded_file)
             
@@ -293,8 +331,8 @@ def main():
                 st.metric("File Size", f"{uploaded_file.size / 1024 / 1024:.1f} MB")
             
             # Show preview
-            with st.expander("📋 Data Preview (First 10 rows)"):
-                st.dataframe(df.head(10))
+            with st.expander("📋 Data Preview (First 5 rows)"):
+                st.dataframe(df.head())
             
             # Initialize processor
             processor = VerbatimProcessor()
@@ -304,24 +342,33 @@ def main():
             intnr_column = processor.find_intnr_column(df)
             verbatim_columns = processor.detect_verbatim_columns(df)
             
+            st.metric("ID Column", intnr_column)
+            st.metric("Verbatim Columns Found", len(verbatim_columns))
+            
             if verbatim_columns:
-                st.success(f"Found {len(verbatim_columns)} verbatim columns")
+                st.success("✅ Verbatim columns detected:")
                 
-                # Display verbatim columns with statistics
+                # Display columns in a structured way
                 for i, col in enumerate(verbatim_columns, 1):
                     response_count = df[col].notna().sum()
                     missing_count = df[col].isna().sum()
                     response_rate = (response_count / len(df)) * 100
                     
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.write(f"**{i}. {col}**")
-                    with col2:
-                        st.write(f"Responses: {response_count}")
-                    with col3:
-                        st.write(f"Missing: {missing_count}")
-                    with col4:
-                        st.write(f"Rate: {response_rate:.1f}%")
+                    with st.expander(f"{i}. {col} ({response_count} responses, {response_rate:.1f}%)", expanded=False):
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.write(f"**Responses:** {response_count}")
+                        with col2:
+                            st.write(f"**Missing:** {missing_count}")
+                        with col3:
+                            st.write(f"**Rate:** {response_rate:.1f}%")
+                        
+                        # Show sample responses
+                        sample_responses = df[col].dropna().head(3)
+                        if len(sample_responses) > 0:
+                            st.write("**Sample responses:**")
+                            for resp in sample_responses:
+                                st.write(f"- `{resp}`")
                 
                 # Process button
                 if st.button("🚀 Process Data & Generate Excel", type="primary", use_container_width=True):
@@ -334,24 +381,13 @@ def main():
                             # Results summary
                             st.subheader("📊 Processing Results")
                             
-                            results_col1, results_col2, results_col3, results_col4 = st.columns(4)
+                            results_col1, results_col2, results_col3 = st.columns(3)
                             with results_col1:
                                 st.metric("Total Samples", result_info['total_samples'])
                             with results_col2:
                                 st.metric("Questions", result_info['total_questions'])
                             with results_col3:
                                 st.metric("Excel Sheets", result_info['sheets_created'])
-                            with results_col4:
-                                st.metric("ID Column", result_info['intnr_column'])
-                            
-                            # Important note about data preservation
-                            st.info("""
-                            **📝 Important:** All verbatim text data is preserved exactly as provided, including:
-                            - Non-English characters (Arabic, Chinese, etc.)
-                            - Short responses
-                            - Special characters
-                            - Emojis and symbols
-                            """)
                             
                             # Download section
                             st.subheader("💾 Download Results")
@@ -367,111 +403,25 @@ def main():
                                 data=output_bytes,
                                 file_name=download_name,
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True,
-                                help="Click to download the processed Excel workbook with all samples included"
+                                use_container_width=True
                             )
-                            
-                            # Features explanation
-                            with st.expander("📁 What's included in the download?"):
-                                st.markdown("""
-                                **Excel Workbook Contents:**
-                                - 📊 **Summary Sheet**: Overview of all questions with response rates
-                                - ❓ **Question Sheets**: One sheet per verbatim question (ALL samples included)
-                                - 👥 **Sample Tracking**: Master list of all respondents
-                                
-                                **Key Features:**
-                                - ✅ All samples included in every question sheet
-                                - ✅ Consistent sample size across all analysis
-                                - ✅ Missing responses shown as blank cells
-                                - ✅ **ALL text preserved exactly as provided**
-                                - ✅ Response rates calculated for each question
-                                - ✅ Auto-filters applied for easy analysis
-                                """)
                             
                         except Exception as e:
                             st.error(f"❌ Processing error: {str(e)}")
-                            st.info("Please check your data format and try again.")
             else:
-                st.error("No verbatim columns detected. Please check your data format.")
+                st.error("No verbatim columns detected.")
                 st.info("""
-                **Tips for better detection:**
-                - Ensure you have columns with text responses
-                - Column names with words like 'verbatim', 'comment', 'text', 'response' work best
-                - Avoid columns that are entirely empty or contain only dates/addresses
-                - Make sure your data has some text responses
+                **If columns are missing that should be included:**
+                - The app now uses more inclusive detection
+                - Common patterns like Q8e_1, TA9C5, S8, etc. should be detected
+                - Only explicitly named NULL/date/address columns are excluded
                 """)
                         
         except Exception as e:
             st.error(f"❌ Error reading file: {str(e)}")
-            st.info("Please make sure you've uploaded a valid Excel file.")
     
     else:
-        # Instructions when no file uploaded
         st.info("👆 Please upload an Excel file to get started")
-        
-        # Sample data section
-        st.subheader("🎯 Data Preservation Features")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("""
-            **Now Preserving All Text:**
-            - ✅ Arabic: "لا"، "شكراً"
-            - ✅ Short responses: "no", "yes", "ok"
-            - ✅ Special characters: "❤️", "!!!", "??"
-            - ✅ Mixed languages: "Good - جيد"
-            - ✅ Emojis: "😊", "👍", "🌟"
-            """)
-        
-        with col2:
-            st.markdown("""
-            **Only Filtering:**
-            - 🚫 Explicit NULL values
-            - 🚫 Empty strings
-            - 🚫 Actual "null", "n/a", "empty" text
-            - 🚫 System missing values
-            """)
-        
-        # Sample data download
-        st.subheader("📥 Need a sample file?")
-        
-        # Create sample data with diverse text to demonstrate
-        sample_data = {
-            'respondent_id': [1001, 1002, 1003, 1004, 1005, 1006],
-            'verbatim_feedback': [
-                'I really like the product design and user interface',
-                'لا أحب هذا المنتج',  # Arabic text
-                'Good - جيد',  # Mixed English/Arabic
-                '❤️ Excellent!',  # Emoji
-                'No',  # Short response
-                'Very satisfied with the service provided 😊'  # Emoji
-            ],
-            'open_comments': [
-                'The mobile app works very smoothly',
-                'شكراً للمساعدة',  # Arabic thanks
-                'Could be better ???',  # Special characters
-                '👍👍👍',  # Emoji only
-                'OK',  # Short response
-                'Perfect! 🌟🌟🌟'  # Emojis
-            ],
-            'response_date': ['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04', '2024-01-05', '2024-01-06'],
-            'customer_address': ['123 Main St', '456 Oak Ave', '789 Pine Rd', '321 Elm St', '654 Maple Ave', '987 Cedar Ln']
-        }
-        sample_df = pd.DataFrame(sample_data)
-        
-        sample_output = io.BytesIO()
-        with pd.ExcelWriter(sample_output, engine='xlsxwriter') as writer:
-            sample_df.to_excel(writer, sheet_name='SurveyData', index=False)
-        sample_output.seek(0)
-        
-        st.download_button(
-            label="Download Sample Template with Diverse Text",
-            data=sample_output,
-            file_name="sample_survey_data_diverse_text.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="This sample file contains diverse text content to demonstrate the preservation features"
-        )
 
 if __name__ == "__main__":
     main()
