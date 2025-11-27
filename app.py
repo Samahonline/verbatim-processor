@@ -115,8 +115,8 @@ class VerbatimProcessor:
                 # Sample to check if it's text data
                 sample = df[column].dropna().head(10)
                 if len(sample) > 0:
-                    text_like = sum(1 for val in sample if isinstance(val, str) and len(str(val).strip()) > 10)
-                    if text_like / len(sample) > 0.5:  # If >50% seems like text
+                    text_like = sum(1 for val in sample if isinstance(val, str) and len(str(val).strip()) > 0)
+                    if text_like / len(sample) > 0.3:  # Lower threshold to be more inclusive
                         verbatim_columns.append(column)
                     else:
                         excluded_columns.append((column_name, "Not text-like"))
@@ -133,20 +133,20 @@ class VerbatimProcessor:
         return verbatim_columns
 
     def clean_verbatim_value(self, value):
-        """Clean individual verbatim values while preserving missing data structure"""
+        """
+        Clean individual verbatim values while preserving ALL text content
+        Only removes actual NULL indicators, preserves all other text including non-English
+        """
         if pd.isna(value):
             return ""  # Keep as empty string for missing responses
         
         value_str = str(value).strip()
         
-        # Check for NULL indicators
-        if any(null_indicator in value_str.lower() for null_indicator in self.null_indicators):
+        # Only filter out explicit NULL indicators, preserve all other text
+        if value_str.lower() in [null.lower() for null in self.null_indicators]:
             return ""
             
-        # Check for very short meaningless responses
-        if len(value_str) < 3:
-            return ""
-            
+        # Return the original text as-is, preserving all characters including Arabic, etc.
         return value_str
 
     def process_dataframe(self, df: pd.DataFrame) -> Tuple[io.BytesIO, Dict]:
@@ -196,6 +196,7 @@ class VerbatimProcessor:
                     result_df = df[[intnr_column, verbatim_col]].copy()
                     
                     # Clean the verbatim responses but keep all rows
+                    # PRESERVE ALL TEXT CONTENT - only remove actual NULL indicators
                     result_df['Cleaned_Response'] = result_df[verbatim_col].apply(self.clean_verbatim_value)
                     
                     # Create final output with original ID and cleaned response
@@ -258,13 +259,12 @@ def main():
     st.markdown("""
     **Upload your Excel file to automatically extract and organize verbatim text responses**
     
-    *New Feature: All samples are included in every sheet for consistent analysis*
-    
     *Features:*
     - 🔍 Automatically detects verbatim columns
     - 🚫 Excludes NULL, date, and address columns
     - 📄 Creates separate sheets for each question
     - 👥 **Includes ALL samples (even missing responses)**
+    - 🌍 **Preserves ALL text content (including non-English characters)**
     - 💾 Downloads formatted Excel workbook
     """)
     
@@ -344,6 +344,15 @@ def main():
                             with results_col4:
                                 st.metric("ID Column", result_info['intnr_column'])
                             
+                            # Important note about data preservation
+                            st.info("""
+                            **📝 Important:** All verbatim text data is preserved exactly as provided, including:
+                            - Non-English characters (Arabic, Chinese, etc.)
+                            - Short responses
+                            - Special characters
+                            - Emojis and symbols
+                            """)
+                            
                             # Download section
                             st.subheader("💾 Download Results")
                             
@@ -374,6 +383,7 @@ def main():
                                 - ✅ All samples included in every question sheet
                                 - ✅ Consistent sample size across all analysis
                                 - ✅ Missing responses shown as blank cells
+                                - ✅ **ALL text preserved exactly as provided**
                                 - ✅ Response rates calculated for each question
                                 - ✅ Auto-filters applied for easy analysis
                                 """)
@@ -400,57 +410,50 @@ def main():
         st.info("👆 Please upload an Excel file to get started")
         
         # Sample data section
-        st.subheader("🎯 How it works with sample consistency")
+        st.subheader("🎯 Data Preservation Features")
         
         col1, col2 = st.columns(2)
         
         with col1:
             st.markdown("""
-            **Before (Traditional Approach):**
-            - Question 1: 850 samples (only respondents who answered)
-            - Question 2: 720 samples (only respondents who answered)
-            - Question 3: 910 samples (only respondents who answered)
-            *→ Inconsistent sample sizes!*
+            **Now Preserving All Text:**
+            - ✅ Arabic: "لا"، "شكراً"
+            - ✅ Short responses: "no", "yes", "ok"
+            - ✅ Special characters: "❤️", "!!!", "??"
+            - ✅ Mixed languages: "Good - جيد"
+            - ✅ Emojis: "😊", "👍", "🌟"
             """)
         
         with col2:
             st.markdown("""
-            **Now (Improved Approach):**
-            - Question 1: 1,000 samples (ALL respondents)
-            - Question 2: 1,000 samples (ALL respondents) 
-            - Question 3: 1,000 samples (ALL respondents)
-            *→ Consistent sample sizes!*
+            **Only Filtering:**
+            - 🚫 Explicit NULL values
+            - 🚫 Empty strings
+            - 🚫 Actual "null", "n/a", "empty" text
+            - 🚫 System missing values
             """)
         
         # Sample data download
         st.subheader("📥 Need a sample file?")
         
-        # Create sample data with missing responses to demonstrate
+        # Create sample data with diverse text to demonstrate
         sample_data = {
             'respondent_id': [1001, 1002, 1003, 1004, 1005, 1006],
             'verbatim_feedback': [
                 'I really like the product design and user interface',
-                'The customer service could be improved',
-                None,  # Missing response
-                'Overall satisfied but would like more features',
-                'Excellent quality and fast delivery',
-                ''  # Empty response
+                'لا أحب هذا المنتج',  # Arabic text
+                'Good - جيد',  # Mixed English/Arabic
+                '❤️ Excellent!',  # Emoji
+                'No',  # Short response
+                'Very satisfied with the service provided 😊'  # Emoji
             ],
             'open_comments': [
                 'The mobile app works very smoothly',
-                None,  # Missing response
-                'Better documentation would be helpful',
-                'Price is reasonable for the value',
-                '',  # Empty response
-                'Great product overall'
-            ],
-            'additional_thoughts': [
-                None,  # Missing
-                'Would recommend to friends',
-                'Good value for money',
-                None,  # Missing
-                'Easy to use interface',
-                'Fast shipping'
+                'شكراً للمساعدة',  # Arabic thanks
+                'Could be better ???',  # Special characters
+                '👍👍👍',  # Emoji only
+                'OK',  # Short response
+                'Perfect! 🌟🌟🌟'  # Emojis
             ],
             'response_date': ['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04', '2024-01-05', '2024-01-06'],
             'customer_address': ['123 Main St', '456 Oak Ave', '789 Pine Rd', '321 Elm St', '654 Maple Ave', '987 Cedar Ln']
@@ -463,11 +466,11 @@ def main():
         sample_output.seek(0)
         
         st.download_button(
-            label="Download Sample Template with Missing Data",
+            label="Download Sample Template with Diverse Text",
             data=sample_output,
-            file_name="sample_survey_data_with_missing.xlsx",
+            file_name="sample_survey_data_diverse_text.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="This sample file contains missing responses to demonstrate the new feature"
+            help="This sample file contains diverse text content to demonstrate the preservation features"
         )
 
 if __name__ == "__main__":
