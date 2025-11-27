@@ -126,13 +126,13 @@ class VerbatimProcessor:
                 if self._is_definitely_numeric(value_str):
                     numeric_count += 1
         
-        # If more than 70% is numeric, exclude the column (lowered threshold)
+        # If more than 60% is numeric, exclude the column (lowered threshold)
         numeric_ratio = numeric_count / total_count if total_count > 0 else 0
-        return numeric_ratio > 0.7
+        return numeric_ratio > 0.6
 
     def _is_definitely_numeric(self, value_str: str) -> bool:
         """
-        More aggressive numeric detection for decimal numbers
+        More aggressive numeric detection for decimal numbers and integers
         """
         # Remove any whitespace
         value_str = value_str.strip()
@@ -141,7 +141,7 @@ class VerbatimProcessor:
         if not value_str:
             return False
             
-        # Common numeric patterns
+        # Common numeric patterns - expanded to catch more cases
         patterns = [
             r'^[+-]?\d*\.?\d+$',  # Basic decimal: 1, 1.5, .5, -2.3
             r'^[+-]?\d+\.\d+$',   # Must have decimal point with digits on both sides: 1.0, 0.5
@@ -150,11 +150,14 @@ class VerbatimProcessor:
             r'^[+-]?\d{1,3}(,\d{3})*(\.\d+)?$',  # Numbers with commas
             r'^[+-]?\d*\.?\d+%$', # Percentages
             r'^[+-]?\d+\.\d+e[+-]?\d+$',  # Scientific notation
+            r'^\d+$',             # Pure integers
+            r'^[+-]?\d+$',        # Integers with sign
+            r'^\d+\s*$',          # Integers with trailing spaces
         ]
         
-        # Check patterns
+        # Check patterns first
         for pattern in patterns:
-            if re.match(pattern, value_str.replace(',', '')):  # Remove commas for matching
+            if re.match(pattern, value_str.replace(',', '').replace(' ', '')):  # Remove commas and spaces for matching
                 return True
         
         # Try direct float conversion (most reliable)
@@ -180,6 +183,10 @@ class VerbatimProcessor:
                         return True
                     except:
                         pass
+        
+        # Check for integer-only strings (no letters, no special chars except +-)
+        if value_str.replace('+', '').replace('-', '').replace(' ', '').isdigit():
+            return True
         
         return False
 
