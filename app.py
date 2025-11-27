@@ -100,7 +100,7 @@ class VerbatimProcessor:
             return False
         
         # Sample the data
-        sample_size = min(200, len(non_null_series))  # Increased sample size
+        sample_size = min(200, len(non_null_series))
         sample = non_null_series.head(sample_size)
         
         numeric_count = 0
@@ -157,7 +157,7 @@ class VerbatimProcessor:
         
         # Check patterns first
         for pattern in patterns:
-            if re.match(pattern, value_str.replace(',', '').replace(' ', '')):  # Remove commas and spaces for matching
+            if re.match(pattern, value_str.replace(',', '').replace(' ', '')):
                 return True
         
         # Try direct float conversion (most reliable)
@@ -176,7 +176,7 @@ class VerbatimProcessor:
             if len(parts) == 2:
                 before_decimal = ''.join(c for c in parts[0] if c.isdigit() or c in '+-')
                 after_decimal = ''.join(c for c in parts[1] if c.isdigit())
-                if before_decimal or after_decimal:  # At least one part has digits
+                if before_decimal or after_decimal:
                     try:
                         test_value = f"{before_decimal or '0'}.{after_decimal}"
                         float(test_value)
