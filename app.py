@@ -85,7 +85,7 @@ class VerbatimProcessor:
 
     def is_numeric_column(self, series: pd.Series) -> bool:
         """
-        Check if column contains mostly numeric data
+        Check if column contains mostly numeric data including decimals
         """
         if series.empty:
             return False
@@ -107,21 +107,49 @@ class VerbatimProcessor:
                 
             total_count += 1
             
-            # Check if value is numeric
+            # Check if value is numeric type
             if isinstance(value, (int, float, np.number)):
                 numeric_count += 1
             elif isinstance(value, str):
-                # Check if string can be converted to number
-                try:
-                    float(value)
+                value_str = str(value).strip()
+                
+                # Skip system NULL values
+                if self._is_system_null(value_str):
+                    continue
+                
+                # Enhanced decimal number detection
+                # Pattern for decimal numbers: optional sign, digits, optional decimal point, optional digits
+                decimal_pattern = r'^[+-]?\d*\.?\d+$'
+                
+                # Pattern for integers
+                integer_pattern = r'^[+-]?\d+$'
+                
+                # Pattern for numbers with commas (thousands separators)
+                comma_pattern = r'^[+-]?\d{1,3}(,\d{3})*(\.\d+)?$'
+                
+                # Pattern for percentages
+                percentage_pattern = r'^[+-]?\d*\.?\d+%$'
+                
+                # Check if it matches any numeric pattern
+                if (re.match(decimal_pattern, value_str) or 
+                    re.match(integer_pattern, value_str) or 
+                    re.match(comma_pattern, value_str.replace(',', '')) or  # Remove commas for validation
+                    re.match(percentage_pattern, value_str)):
                     numeric_count += 1
-                except (ValueError, TypeError):
-                    # Check if it's a percentage
-                    if re.match(r'^\d+%$', value.strip()):
+                else:
+                    # Additional check: try to convert to float
+                    try:
+                        # Remove commas and percentage signs for conversion
+                        clean_value = value_str.replace(',', '').replace('%', '')
+                        float(clean_value)
                         numeric_count += 1
+                    except (ValueError, TypeError):
+                        # Not a number
+                        pass
         
         # If more than 80% is numeric, exclude the column
-        return (numeric_count / total_count) > 0.8 if total_count > 0 else False
+        numeric_ratio = numeric_count / total_count if total_count > 0 else 0
+        return numeric_ratio > 0.8
 
     def is_date_column(self, series: pd.Series, column_name: str = "") -> bool:
         """
@@ -156,6 +184,10 @@ class VerbatimProcessor:
             total_count += 1
             value_str = str(value).strip()
             
+            # Skip numeric values that might be mistaken for dates
+            if self._looks_like_number(value_str):
+                continue
+            
             # Check for date patterns
             if self._looks_like_date(value_str):
                 date_count += 1
@@ -164,6 +196,30 @@ class VerbatimProcessor:
                 date_count += 1
         
         return (date_count / total_count) > 0.7 if total_count > 0 else False
+
+    def _looks_like_number(self, value_str: str) -> bool:
+        """
+        Check if a string looks like a number (including decimals)
+        """
+        # Patterns for different number formats
+        patterns = [
+            r'^[+-]?\d*\.?\d+$',  # Decimal numbers
+            r'^[+-]?\d+$',         # Integers
+            r'^[+-]?\d{1,3}(,\d{3})*(\.\d+)?$',  # Numbers with commas
+            r'^[+-]?\d*\.?\d+%$'   # Percentages
+        ]
+        
+        for pattern in patterns:
+            if re.match(pattern, value_str.replace(',', '')):  # Remove commas for matching
+                return True
+        
+        # Try float conversion
+        try:
+            clean_value = value_str.replace(',', '').replace('%', '')
+            float(clean_value)
+            return True
+        except (ValueError, TypeError):
+            return False
 
     def _looks_like_date(self, value: str) -> bool:
         """Check if string looks like a date"""
@@ -252,7 +308,7 @@ class VerbatimProcessor:
             return True, "NULL content (#NULL! values)"
         
         if self.is_numeric_column(series):
-            return True, "Numeric column"
+            return True, "Numeric column (including decimals)"
         
         if self.is_date_column(series, column_name):
             return True, "Date content"
@@ -335,6 +391,10 @@ class VerbatimProcessor:
             
             # Skip system NULL values and Excel errors
             if self._is_system_null(value_str):
+                continue
+            
+            # Skip numeric values
+            if self._looks_like_number(value_str):
                 continue
             
             # Check if it's text (contains letters or meaningful text patterns)
@@ -420,13 +480,14 @@ class VerbatimProcessor:
                     sheet_name = f"Q{i+1}_{col}"[:31]
                     total_samples = len(df)
                     
-                    # Calculate actual responses (excluding system NULLs)
+                    # Calculate actual responses (excluding system NULLs and numeric values)
                     response_count = 0
                     for value in df[col]:
                         if pd.isna(value):
                             continue
                         value_str = str(value).strip()
-                        if not self._is_system_null(value_str):
+                        if (not self._is_system_null(value_str) and 
+                            not self._looks_like_number(value_str)):
                             response_count += 1
                     
                     missing_count = total_samples - response_count
@@ -457,7 +518,7 @@ class VerbatimProcessor:
                     # Create dataframe with ALL samples
                     result_df = df[[intnr_column, verbatim_col]].copy()
                     
-                    # Clean responses - filter out #NULL! and system NULLs
+                    # Clean responses - filter out #NULL!, system NULLs, and numeric values
                     result_df['Cleaned_Response'] = result_df[verbatim_col].apply(self.clean_verbatim_value)
                     
                     # Create final output
@@ -501,7 +562,7 @@ def main():
     st.markdown("""
     **Upload your Excel file to automatically extract verbatim text responses**
     
-    *Enhanced NULL filtering: Now properly excludes #NULL! columns and values*
+    *Enhanced filtering: Now properly excludes numeric columns (including decimals), dates, and #NULL! values*
     """)
     
     uploaded_file = st.file_uploader(
@@ -541,12 +602,14 @@ def main():
                 st.success("✅ Verbatim columns detected:")
                 
                 for i, col in enumerate(verbatim_columns, 1):
-                    # Calculate actual responses excluding system NULLs
+                    # Calculate actual responses excluding system NULLs and numeric values
                     response_count = 0
                     for value in df[col]:
                         if pd.isna(value):
                             continue
-                        if not processor._is_system_null(str(value).strip()):
+                        value_str = str(value).strip()
+                        if (not processor._is_system_null(value_str) and 
+                            not processor._looks_like_number(value_str)):
                             response_count += 1
                     
                     missing_count = len(df) - response_count
@@ -561,17 +624,20 @@ def main():
                         with col3:
                             st.write(f"**Rate:** {response_rate:.1f}%")
                         
-                        # Show sample non-NULL responses
+                        # Show sample non-NULL, non-numeric responses
                         sample_responses = []
-                        for value in df[col].dropna().head(3):
+                        for value in df[col].dropna().head(5):
                             value_str = str(value).strip()
-                            if not processor._is_system_null(value_str):
+                            if (not processor._is_system_null(value_str) and 
+                                not processor._looks_like_number(value_str)):
                                 sample_responses.append(value_str)
                         
                         if sample_responses:
                             st.write("**Sample responses:**")
                             for resp in sample_responses:
                                 st.write(f"- `{resp}`")
+                        else:
+                            st.write("*No valid text responses found*")
                 
                 if st.button("🚀 Process Data & Generate Excel", type="primary", use_container_width=True):
                     with st.spinner("Processing data and generating Excel file..."):
