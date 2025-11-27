@@ -24,11 +24,12 @@ class VerbatimProcessor:
             'q8', 'q9', 'ta', 'tb', 'tc', 'tf', 'ts', 's8', 's9'
         ]
         
-        # NULL indicators for both column names and content
+        # Enhanced NULL indicators including Excel error values
         self.null_indicators = [
             'null', 'none', 'empty', 'n/a', 'na', 'missing', 
             'no data', 'no response', 'blank', '#null!', '#null',
-            'system missing', 'sysmiss'
+            '#n/a', '#value!', '#ref!', '#div/0!', '#name?',
+            'system missing', 'sysmiss', '.', '-', '--'
         ]
         
         self.date_keywords = [
@@ -179,6 +180,58 @@ class VerbatimProcessor:
         except:
             return False
 
+    def is_null_column(self, series: pd.Series, column_name: str = "") -> bool:
+        """
+        Check if column is mostly NULL values including #NULL!
+        """
+        if series.empty:
+            return True
+        
+        # Check if all values are NaN
+        if series.isna().all():
+            return True
+        
+        non_null_series = series.dropna()
+        if len(non_null_series) == 0:
+            return True
+        
+        # Sample the non-null values to check for #NULL! and other system missing
+        sample_size = min(100, len(non_null_series))
+        sample = non_null_series.head(sample_size)
+        
+        null_like_count = 0
+        total_count = 0
+        
+        for value in sample:
+            if pd.isna(value):
+                continue
+                
+            total_count += 1
+            value_str = str(value).strip()
+            
+            # Check for NULL indicators including Excel errors
+            is_null_like = False
+            
+            # Exact matches for common NULL values
+            if value_str.lower() in [null.lower() for null in self.null_indicators]:
+                is_null_like = True
+            # Check for #NULL! and other Excel errors
+            elif value_str.startswith('#') and any(error in value_str.lower() for error in ['null', 'n/a', 'value', 'ref', 'div', 'name']):
+                is_null_like = True
+            # Empty strings or very short meaningless values
+            elif value_str == '' or (len(value_str) <= 2 and not any(c.isalpha() for c in value_str)):
+                is_null_like = True
+            # System missing values
+            elif value_str in ['.', '-', '--']:
+                is_null_like = True
+            
+            if is_null_like:
+                null_like_count += 1
+        
+        # If more than 90% of non-null values are NULL-like, exclude the column
+        null_ratio = null_like_count / total_count if total_count > 0 else 0
+        return null_ratio > 0.9
+
     def should_exclude_column(self, df: pd.DataFrame, column_name: str) -> Tuple[bool, str]:
         """
         Check if column should be excluded with reason
@@ -195,8 +248,8 @@ class VerbatimProcessor:
             return True, "Address column name"
         
         # Check content exclusions
-        if series.isna().all():
-            return True, "All NULL values"
+        if self.is_null_column(series, column_name):
+            return True, "NULL content (#NULL! values)"
         
         if self.is_numeric_column(series):
             return True, "Numeric column"
@@ -204,38 +257,7 @@ class VerbatimProcessor:
         if self.is_date_column(series, column_name):
             return True, "Date content"
         
-        # Check if mostly system NULL values
-        if self._is_mostly_system_null(series):
-            return True, "System NULL values"
-        
         return False, ""
-
-    def _is_mostly_system_null(self, series: pd.Series) -> bool:
-        """Check if column contains mostly system NULL values"""
-        non_null_series = series.dropna()
-        if len(non_null_series) == 0:
-            return True
-        
-        sample_size = min(50, len(non_null_series))
-        sample = non_null_series.head(sample_size)
-        
-        null_count = 0
-        total_count = 0
-        
-        for value in sample:
-            if pd.isna(value):
-                continue
-                
-            total_count += 1
-            value_str = str(value).strip().lower()
-            
-            # Check for system NULL indicators
-            if any(null_indicator in value_str for null_indicator in self.null_indicators):
-                null_count += 1
-            elif value_str in ['', '.']:  # Common system missing values
-                null_count += 1
-        
-        return (null_count / total_count) > 0.8 if total_count > 0 else False
 
     def find_intnr_column(self, df: pd.DataFrame) -> str:
         intnr_patterns = ['intnr', 'interview', 'respondent', 'id', 'caseid', 'resp_id']
@@ -283,7 +305,7 @@ class VerbatimProcessor:
         
         # Show excluded columns
         if excluded_columns:
-            with st.sidebar.expander("🚫 Excluded Columns", expanded=False):
+            with st.sidebar.expander("🚫 Excluded Columns", expanded=True):
                 st.write(f"Excluded {len(excluded_columns)} columns:")
                 for col, reason in excluded_columns:
                     st.write(f"❌ {col} ({reason})")
@@ -311,34 +333,54 @@ class VerbatimProcessor:
             total_count += 1
             value_str = str(value).strip()
             
-            # Skip system NULL values
-            if any(null_indicator in value_str.lower() for null_indicator in self.null_indicators):
-                continue
-            if value_str in ['', '.']:
+            # Skip system NULL values and Excel errors
+            if self._is_system_null(value_str):
                 continue
             
             # Check if it's text (contains letters or meaningful text patterns)
             if any(char.isalpha() for char in value_str):
                 text_count += 1
-            elif len(value_str) > 5 and any(char.isalnum() for char in value_str):
+            elif len(value_str) > 3 and any(char.isalnum() for char in value_str):
                 # Longer strings with alphanumeric content
                 text_count += 1
         
-        return (text_count / total_count) > 0.5 if total_count > 0 else False
+        return (text_count / total_count) > 0.3 if total_count > 0 else False
+
+    def _is_system_null(self, value_str: str) -> bool:
+        """
+        Check if a value is a system NULL value including #NULL!
+        """
+        value_lower = value_str.lower()
+        
+        # Exact matches
+        if value_lower in [null.lower() for null in self.null_indicators]:
+            return True
+        
+        # Excel error values
+        if value_str.startswith('#') and any(error in value_lower for error in ['null', 'n/a', 'value', 'ref', 'div', 'name']):
+            return True
+        
+        # Empty or very short meaningless values
+        if value_str == '' or (len(value_str) <= 2 and not any(c.isalpha() for c in value_str)):
+            return True
+        
+        # System missing values
+        if value_str in ['.', '-', '--']:
+            return True
+        
+        return False
 
     def clean_verbatim_value(self, value):
         """
-        Clean verbatim values - preserve real text, filter system NULLs
+        Clean verbatim values - preserve real text, filter system NULLs including #NULL!
         """
         if pd.isna(value):
             return ""
         
         value_str = str(value).strip()
         
-        # Filter out system NULL values
-        if any(null_indicator in value_str.lower() for null_indicator in self.null_indicators):
-            return ""
-        if value_str in ['', '.']:
+        # Filter out system NULL values including #NULL!
+        if self._is_system_null(value_str):
             return ""
         
         return value_str
@@ -377,15 +419,24 @@ class VerbatimProcessor:
                 for i, col in enumerate(verbatim_columns):
                     sheet_name = f"Q{i+1}_{col}"[:31]
                     total_samples = len(df)
-                    responses_received = df[col].notna().sum()
-                    missing_responses = df[col].isna().sum()
-                    response_rate = (responses_received / total_samples) * 100
+                    
+                    # Calculate actual responses (excluding system NULLs)
+                    response_count = 0
+                    for value in df[col]:
+                        if pd.isna(value):
+                            continue
+                        value_str = str(value).strip()
+                        if not self._is_system_null(value_str):
+                            response_count += 1
+                    
+                    missing_count = total_samples - response_count
+                    response_rate = (response_count / total_samples) * 100
                     
                     summary_data['Sheet Name'].append(sheet_name)
                     summary_data['Original Column'].append(col)
                     summary_data['Total Sample Size'].append(total_samples)
-                    summary_data['Responses Received'].append(responses_received)
-                    summary_data['Missing Responses'].append(missing_responses)
+                    summary_data['Responses Received'].append(response_count)
+                    summary_data['Missing Responses'].append(missing_count)
                     summary_data['Response Rate'].append(f"{response_rate:.1f}%")
                 
                 summary_df = pd.DataFrame(summary_data)
@@ -406,7 +457,7 @@ class VerbatimProcessor:
                     # Create dataframe with ALL samples
                     result_df = df[[intnr_column, verbatim_col]].copy()
                     
-                    # Clean responses
+                    # Clean responses - filter out #NULL! and system NULLs
                     result_df['Cleaned_Response'] = result_df[verbatim_col].apply(self.clean_verbatim_value)
                     
                     # Create final output
@@ -430,19 +481,6 @@ class VerbatimProcessor:
                     worksheet.set_column('A:A', 15)
                     worksheet.set_column('B:B', 50)
                     worksheet.autofilter(0, 0, len(final_df), 1)
-                
-                # Sample Tracking Sheet
-                tracking_data = {
-                    intnr_column: df[intnr_column],
-                    'Total_Samples': len(df)
-                }
-                tracking_df = pd.DataFrame(tracking_data)
-                tracking_df.to_excel(writer, sheet_name='Sample_Tracking', index=False)
-                
-                tracking_sheet = writer.sheets['Sample_Tracking']
-                for col_num, value in enumerate(tracking_df.columns.values):
-                    tracking_sheet.write(0, col_num, value, header_format)
-                tracking_sheet.set_column('A:B', 15)
             
             output.seek(0)
             
@@ -450,7 +488,7 @@ class VerbatimProcessor:
                 'status': 'success',
                 'intnr_column': intnr_column,
                 'verbatim_columns': verbatim_columns,
-                'sheets_created': len(verbatim_columns) + 2,
+                'sheets_created': len(verbatim_columns) + 1,
                 'total_samples': len(df),
                 'total_questions': len(verbatim_columns)
             }
@@ -463,7 +501,7 @@ def main():
     st.markdown("""
     **Upload your Excel file to automatically extract verbatim text responses**
     
-    *Smart Detection: Includes verbatim columns, excludes numerical data, dates, and system NULL values*
+    *Enhanced NULL filtering: Now properly excludes #NULL! columns and values*
     """)
     
     uploaded_file = st.file_uploader(
@@ -503,8 +541,15 @@ def main():
                 st.success("✅ Verbatim columns detected:")
                 
                 for i, col in enumerate(verbatim_columns, 1):
-                    response_count = df[col].notna().sum()
-                    missing_count = df[col].isna().sum()
+                    # Calculate actual responses excluding system NULLs
+                    response_count = 0
+                    for value in df[col]:
+                        if pd.isna(value):
+                            continue
+                        if not processor._is_system_null(str(value).strip()):
+                            response_count += 1
+                    
+                    missing_count = len(df) - response_count
                     response_rate = (response_count / len(df)) * 100
                     
                     with st.expander(f"{i}. {col} ({response_count} responses, {response_rate:.1f}%)", expanded=False):
@@ -516,8 +561,14 @@ def main():
                         with col3:
                             st.write(f"**Rate:** {response_rate:.1f}%")
                         
-                        sample_responses = df[col].dropna().head(3)
-                        if len(sample_responses) > 0:
+                        # Show sample non-NULL responses
+                        sample_responses = []
+                        for value in df[col].dropna().head(3):
+                            value_str = str(value).strip()
+                            if not processor._is_system_null(value_str):
+                                sample_responses.append(value_str)
+                        
+                        if sample_responses:
                             st.write("**Sample responses:**")
                             for resp in sample_responses:
                                 st.write(f"- `{resp}`")
